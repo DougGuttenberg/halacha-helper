@@ -239,19 +239,34 @@ Analyze the question and return a structured assessment. Do NOT answer the quest
 - **minhag**: Custom (binding but not law)
 - **uncertain**: Cannot determine without more information
 
-## Context Assessment
+## Context Assessment - BE CONSERVATIVE
 
-Determine if the question requires situational context to answer properly. Many halachic questions depend on circumstances.
+**Default to needsContext: false.** Only set needsContext: true when the practical ruling would MATERIALLY CHANGE based on circumstances.
 
-Examples requiring context:
-- "Can I do X?" often depends on: When? Where? What's the situation?
-- Questions about waiting times depend on: Which tradition does the person follow?
-- Questions about leniencies depend on: Is there financial loss? Health concerns?
+### DO NOT ask for context when:
+- The halacha is clear-cut regardless of circumstances (e.g., "Can I open an umbrella on Shabbat?" - prohibited as ohel, period)
+- The question asks about a general prohibition or permission
+- Circumstances would only affect edge cases or rare exceptions
+- You can give the general rule and note exceptions in the answer itself
+- The question is definitional or explanatory
 
-Examples NOT requiring context:
-- "What is the law about X?" (asking for general rule)
-- "What bracha do I make on X?" (usually straightforward)
-- "What does X mean?" (definitional)
+### ONLY ask for context when:
+- The ruling genuinely differs based on the answer (e.g., waiting time after meat varies by tradition: 1hr/3hr/6hr)
+- The question explicitly mentions uncertain circumstances
+- Different traditions have substantially different practices that would change the answer
+- Financial hardship or health factors are mentioned and would invoke specific leniencies
+
+### Examples - NO context needed:
+- "Can I open an umbrella on Shabbat?" → No (ohel) - same answer regardless
+- "Can I drive on Shabbat?" → No - same answer regardless
+- "What bracha on bread?" → Hamotzi - straightforward
+- "Can I mix meat and milk?" → No (biblical) - same answer regardless
+- "Is electricity forbidden on Shabbat?" → Give the general ruling
+
+### Examples - Context IS needed:
+- "How long do I wait after eating meat before dairy?" → Tradition matters (1/3/6 hours)
+- "Can I work on Chol Hamoed?" → Type of work and circumstances matter significantly
+- "I have a health condition, can I fast on Yom Kippur?" → Must defer to rabbi anyway
 
 ## Search Term Generation
 
@@ -281,16 +296,10 @@ Return ONLY valid JSON:
     "sugya": "Specific topic",
     "shulchanAruchSection": "OC/YD/EH/CM if known"
   },
-  "needsContext": true|false,
-  "contextQuestions": [
-    {
-      "question": "The follow-up question",
-      "why": "Why this matters",
-      "options": ["Option 1", "Option 2"]
-    }
-  ],
-  "isAmbiguous": true|false,
-  "clarifications": ["What needs clarifying"],
+  "needsContext": false,  // DEFAULT TO FALSE - only true if ruling materially changes
+  "contextQuestions": [], // Empty unless needsContext is true AND questions are essential
+  "isAmbiguous": false,   // Only true if the question itself is unclear
+  "clarifications": [],
   "mustDeferToRabbi": true|false,
   "deferReason": "Why defer (or null)",
   "searchTerms": {
