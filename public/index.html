@@ -33,20 +33,20 @@
   <style>
     @keyframes spin { to { transform: rotate(360deg); } }
     .animate-spin { animation: spin 1s linear infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .animate-pulse { animation: pulse 2s ease-in-out infinite; }
 
     body {
       background: linear-gradient(180deg, #f4f1ea 0%, #e8e4d9 100%);
       background-attachment: fixed;
     }
 
-    /* Subtle paper texture */
     .paper-texture {
       background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
       background-blend-mode: soft-light;
       background-size: 200px 200px;
     }
 
-    /* Decorative border for cards */
     .card-ornate {
       border: 1px solid #d4c5a9;
       box-shadow:
@@ -54,7 +54,6 @@
         inset 0 0 20px rgba(244, 241, 234, 0.5);
     }
 
-    /* Star of David decorative element */
     .star-divider::before {
       content: "✡";
       display: block;
@@ -65,61 +64,44 @@
       margin: 0.5rem 0;
     }
 
-    .jargon {
-      border-bottom: 1px dotted #b8860b;
-      cursor: help;
-    }
-    .jargon:hover {
-      background-color: rgba(184, 134, 11, 0.1);
-    }
-
-    /* Hebrew text styling */
     .hebrew-text {
       font-family: 'Frank Ruhl Libre', serif;
       line-height: 1.8;
     }
 
-    /* Ornate header border */
     .header-ornate {
       border-bottom: 2px solid #b8860b;
       background: linear-gradient(180deg, #1a237e 0%, #283593 100%);
     }
 
-    /* Source card styling */
     .source-card {
       background: linear-gradient(135deg, #fdfcf9 0%, #f4f1ea 100%);
       border-left: 3px solid #b8860b;
     }
 
-    /* Mobile touch improvements */
+    .progress-step {
+      transition: all 0.3s ease;
+    }
+    .progress-step.active {
+      color: #1a237e;
+      font-weight: 600;
+    }
+    .progress-step.complete {
+      color: #166534;
+    }
+    .progress-step.pending {
+      color: #8b7355;
+      opacity: 0.6;
+    }
+
     @media (max-width: 640px) {
-      /* Prevent zoom on input focus */
-      input[type="text"] {
-        font-size: 16px;
-      }
-
-      /* Better touch targets */
-      button, a {
-        min-height: 44px;
-        display: inline-flex;
-        align-items: center;
-      }
-
-      /* Smaller sample buttons are okay */
-      .text-xs.rounded-full {
-        min-height: 32px;
-      }
+      input[type="text"] { font-size: 16px; }
+      button, a { min-height: 44px; display: inline-flex; align-items: center; }
+      .text-xs.rounded-full { min-height: 32px; }
     }
 
-    /* Smooth scrolling */
-    html {
-      scroll-behavior: smooth;
-    }
-
-    /* Better text selection on mobile */
-    * {
-      -webkit-tap-highlight-color: transparent;
-    }
+    html { scroll-behavior: smooth; }
+    * { -webkit-tap-highlight-color: transparent; }
   </style>
 </head>
 <body class="min-h-screen font-serif">
@@ -127,51 +109,33 @@
 
   <script>
     // ===========================================
-    // SEFARIA API
+    // STATE
     // ===========================================
-    const SEFARIA_API = 'https://www.sefaria.org/api';
-
-    async function fetchSourceText(ref) {
-      try {
-        const url = `${SEFARIA_API}/texts/${encodeURIComponent(ref)}?context=0&pad=0`;
-        const response = await fetch(url);
-        if (response.ok) {
-          const data = await response.json();
-          let english = '';
-          let hebrew = '';
-
-          if (data.text) {
-            english = Array.isArray(data.text)
-              ? data.text.flat(3).filter(t => t).join(' ')
-              : data.text;
-          }
-          if (data.he) {
-            hebrew = Array.isArray(data.he)
-              ? data.he.flat(3).filter(t => t).join(' ')
-              : data.he;
-          }
-
-          english = english.replace(/<[^>]*>/g, '').trim().substring(0, 1000);
-          hebrew = hebrew.replace(/<[^>]*>/g, '').trim().substring(0, 1000);
-
-          return { ref, english, hebrew, found: true };
-        }
-      } catch (e) {
-        console.log('Failed to fetch source:', ref, e);
+    let state = {
+      query: '',
+      result: null,
+      loading: false,
+      loadingPhase: null, // 'triage' | 'search' | 'reason'
+      error: null,
+      expandedSources: {},
+      // Multi-turn conversation state
+      conversation: {
+        phase: null, // null | 'needs_context' | 'needs_clarification' | 'complete'
+        sessionState: null,
+        contextQuestions: [],
+        contextAnswers: [],
+        clarifications: []
       }
-      return { ref, english: '', hebrew: '', found: false };
-    }
+    };
 
     // ===========================================
-    // API CALL (goes to our Vercel backend)
+    // API CALLS
     // ===========================================
-    async function askQuestion(question) {
+    async function askQuestion(question, context = null, sessionState = null) {
       const response = await fetch('/api/ask', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ question })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, context, sessionState })
       });
 
       if (!response.ok) {
@@ -185,29 +149,119 @@
     // ===========================================
     // MAIN PROCESSING
     // ===========================================
-    async function processQuestion(question) {
-      const analysis = await askQuestion(question);
-      const sourceTexts = {};
-      if (analysis.sources && analysis.sources.length > 0) {
-        const fetches = analysis.sources.map(ref => fetchSourceText(ref));
-        const results = await Promise.all(fetches);
-        results.forEach(result => {
-          sourceTexts[result.ref] = result;
-        });
+    async function processQuestion(question, context = null, sessionState = null) {
+      // Show triage phase
+      state.loadingPhase = 'triage';
+      render();
+
+      const result = await askQuestion(question, context, sessionState);
+
+      // If we need context, return early
+      if (result.phase === 'needs_context' || result.phase === 'needs_clarification') {
+        return result;
       }
-      return { ...analysis, sourceTexts };
+
+      // Otherwise it went through all phases
+      return result;
     }
 
-    // ===========================================
-    // UI STATE & RENDERING
-    // ===========================================
-    let state = {
-      query: '',
-      result: null,
-      loading: false,
-      error: null,
-      expandedSources: {}
-    };
+    async function handleSearch() {
+      if (!state.query.trim()) return;
+
+      state.loading = true;
+      state.error = null;
+      state.result = null;
+      state.expandedSources = {};
+      state.conversation = {
+        phase: null,
+        sessionState: null,
+        contextQuestions: [],
+        contextAnswers: [],
+        clarifications: []
+      };
+      render();
+
+      try {
+        const result = await processQuestion(state.query);
+
+        if (result.phase === 'needs_context') {
+          state.conversation.phase = 'needs_context';
+          state.conversation.sessionState = result.sessionState;
+          state.conversation.contextQuestions = result.contextQuestions || [];
+          state.loading = false;
+        } else if (result.phase === 'needs_clarification') {
+          state.conversation.phase = 'needs_clarification';
+          state.conversation.sessionState = result.sessionState;
+          state.conversation.clarifications = result.clarifications || [];
+          state.loading = false;
+        } else {
+          state.result = result;
+          state.conversation.phase = 'complete';
+          state.loading = false;
+        }
+      } catch (e) {
+        state.error = e.message;
+        state.loading = false;
+        console.error(e);
+      }
+
+      render();
+    }
+
+    async function handleContextSubmit() {
+      // Gather answers from the form
+      const answers = [];
+      state.conversation.contextQuestions.forEach((q, i) => {
+        const input = document.getElementById(`context-answer-${i}`);
+        if (input && input.value.trim()) {
+          answers.push({
+            question: q.question,
+            answer: input.value.trim()
+          });
+        }
+      });
+
+      if (answers.length === 0) {
+        alert('Please answer at least one question');
+        return;
+      }
+
+      state.loading = true;
+      state.loadingPhase = 'search';
+      state.conversation.contextAnswers = answers;
+      render();
+
+      try {
+        // Mark context as complete and continue
+        const sessionState = {
+          ...state.conversation.sessionState,
+          contextComplete: true
+        };
+
+        const result = await askQuestion(state.query, answers, sessionState);
+        state.result = result;
+        state.conversation.phase = 'complete';
+        state.loading = false;
+      } catch (e) {
+        state.error = e.message;
+        state.loading = false;
+        console.error(e);
+      }
+
+      render();
+    }
+
+    async function handleClarificationSubmit(clarifiedQuestion) {
+      state.query = clarifiedQuestion;
+      state.conversation = {
+        phase: null,
+        sessionState: null,
+        contextQuestions: [],
+        contextAnswers: [],
+        clarifications: []
+      };
+      await handleSearch();
+    }
 
     function setQuery(value) {
       state.query = value;
@@ -215,42 +269,29 @@
       if (input) input.value = value;
     }
 
-    async function handleSearch() {
-      if (!state.query.trim()) return;
-      state.loading = true;
-      state.error = null;
-      state.result = null;
-      state.expandedSources = {};
-      render();
-
-      try {
-        state.result = await processQuestion(state.query);
-      } catch (e) {
-        state.error = e.message;
-        console.error(e);
-      } finally {
-        state.loading = false;
-        render();
-      }
-    }
-
     function toggleSource(ref) {
       state.expandedSources[ref] = !state.expandedSources[ref];
       render();
     }
 
+    // ===========================================
+    // ICONS
+    // ===========================================
     const icons = {
       search: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>`,
-      book: `<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>`,
       check: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
       chevronDown: `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>`,
       chevronUp: `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>`,
       external: `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>`,
       loader: `<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>`,
-      user: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>`,
-      star: `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><polygon points="12,2 14.09,8.26 21,9.27 16,14.14 17.18,21.02 12,17.77 6.82,21.02 8,14.14 3,9.27 9.91,8.26"/></svg>`
+      question: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
+      book: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>`,
+      scale: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"></path></svg>`
     };
 
+    // ===========================================
+    // RENDER
+    // ===========================================
     function render() {
       const app = document.getElementById('app');
 
@@ -262,14 +303,13 @@
               <span class="text-goldLight text-sm sm:text-base">✡</span>
               <div class="text-center">
                 <h1 class="text-xl sm:text-2xl font-semibold tracking-wide">HalachaHelper</h1>
-                <p class="text-xs text-blue-200 tracking-widest uppercase">Your Rabbi's Helper</p>
+                <p class="text-xs text-blue-200 tracking-widest uppercase">Source-Based Halachic Research</p>
               </div>
               <span class="text-goldLight text-sm sm:text-base">✡</span>
             </div>
           </div>
         </header>
 
-        <!-- Main -->
         <main class="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-8">
 
           <!-- Search Card -->
@@ -285,6 +325,7 @@
                 value="${state.query.replace(/"/g, '&quot;')}"
                 placeholder="Ask a question about Jewish law..."
                 class="flex-1 px-4 py-3 border-2 border-parchmentDark rounded-lg focus:ring-2 focus:ring-gold focus:border-gold outline-none text-sepia bg-parchment placeholder-sepiaLight text-base"
+                ${state.loading ? 'disabled' : ''}
               />
               <button
                 id="searchBtn"
@@ -292,26 +333,26 @@
                 class="px-6 py-3 bg-navy text-white rounded-lg font-medium hover:bg-navyLight disabled:bg-sepiaLight flex items-center justify-center gap-2 transition-colors min-h-[48px]"
               >
                 ${state.loading ? icons.loader : icons.search}
-                ${state.loading ? 'Seeking...' : 'Ask'}
+                ${state.loading ? 'Searching...' : 'Ask'}
               </button>
             </div>
 
             <div class="mt-4 flex flex-wrap justify-center gap-2">
               <span class="text-xs text-sepiaLight hidden sm:inline">Try:</span>
-              <button onclick="setQuery('Can I say the blessing on the new moon if I see it through a telescope?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark active:bg-parchmentDark border border-parchmentDark transition-colors">new moon + telescope</button>
-              <button onclick="setQuery('Can I bring homemade food to a kosher event?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark active:bg-parchmentDark border border-parchmentDark transition-colors">homemade food</button>
-              <button onclick="setQuery('Does a phone call count for visiting the sick?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark active:bg-parchmentDark border border-parchmentDark transition-colors">visiting the sick</button>
-              <button onclick="setQuery('What is the reason for not mixing meat and dairy?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark active:bg-parchmentDark border border-parchmentDark transition-colors">meat & dairy</button>
+              <button onclick="setQuery('Can I eat dairy after chicken?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark border border-parchmentDark transition-colors">dairy after chicken</button>
+              <button onclick="setQuery('What bracha do I make on granola?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark border border-parchmentDark transition-colors">bracha on granola</button>
+              <button onclick="setQuery('Can I say Kiddush Levana through a window?')" class="text-xs px-3 py-1.5 bg-parchment text-sepia rounded-full hover:bg-parchmentDark border border-parchmentDark transition-colors">Kiddush Levana</button>
             </div>
           </div>
 
-          <!-- Loading -->
-          ${state.loading ? `
-            <div class="card-ornate bg-white rounded-lg p-8 sm:p-12 text-center paper-texture">
-              <div class="inline-block mb-4 text-gold">${icons.loader}</div>
-              <p class="text-sepia italic text-sm sm:text-base">Searching the sources...</p>
-            </div>
-          ` : ''}
+          <!-- Loading with Progress Steps -->
+          ${state.loading ? renderLoadingProgress() : ''}
+
+          <!-- Context Questions (Multi-turn) -->
+          ${state.conversation.phase === 'needs_context' && !state.loading ? renderContextQuestions() : ''}
+
+          <!-- Clarification Needed -->
+          ${state.conversation.phase === 'needs_clarification' && !state.loading ? renderClarifications() : ''}
 
           <!-- Error -->
           ${state.error ? `
@@ -324,11 +365,14 @@
           ${state.result && !state.loading ? renderResult(state.result) : ''}
 
           <!-- Empty state -->
-          ${!state.result && !state.loading && !state.error ? `
+          ${!state.result && !state.loading && !state.error && !state.conversation.phase ? `
             <div class="text-center py-10 sm:py-16 text-sepiaLight">
               <div class="mb-4 text-gold text-3xl sm:text-4xl">✡</div>
               <p class="text-base sm:text-lg text-sepia mb-2">Ask a question about Jewish law or practice</p>
-              <p class="text-xs sm:text-sm">Powered by AI with sources from Sefaria</p>
+              <p class="text-xs sm:text-sm mb-4">Now with source-driven reasoning from Sefaria</p>
+              <div class="text-xs text-sepiaLight max-w-md mx-auto">
+                <p class="mb-2">This tool searches actual halachic texts, applies proper methodology, and will refuse to answer without sources.</p>
+              </div>
             </div>
           ` : ''}
 
@@ -338,7 +382,7 @@
         <footer class="max-w-3xl mx-auto px-4 py-4 sm:py-6 text-center">
           <div class="star-divider"></div>
           <p class="text-xs text-sepiaLight">
-            Sources from <a href="https://www.sefaria.org" target="_blank" class="text-sepia hover:text-gold active:text-gold underline">Sefaria</a> ·
+            Sources from <a href="https://www.sefaria.org" target="_blank" class="text-sepia hover:text-gold underline">Sefaria</a> ·
             Not a substitute for rabbinic guidance
           </p>
         </footer>
@@ -349,182 +393,377 @@
       const btn = document.getElementById('searchBtn');
       if (input) {
         input.addEventListener('input', e => state.query = e.target.value);
-        input.addEventListener('keydown', e => { if (e.key === 'Enter') handleSearch(); });
+        input.addEventListener('keydown', e => { if (e.key === 'Enter' && !state.loading) handleSearch(); });
       }
       if (btn) {
         btn.addEventListener('click', handleSearch);
       }
+
+      // Context submit button
+      const contextBtn = document.getElementById('contextSubmitBtn');
+      if (contextBtn) {
+        contextBtn.addEventListener('click', handleContextSubmit);
+      }
+    }
+
+    function renderLoadingProgress() {
+      const phases = [
+        { key: 'triage', label: 'Analyzing question...', icon: icons.question },
+        { key: 'search', label: 'Searching sources...', icon: icons.book },
+        { key: 'reason', label: 'Applying halachic reasoning...', icon: icons.scale }
+      ];
+
+      const currentIndex = phases.findIndex(p => p.key === state.loadingPhase);
+
+      return `
+        <div class="card-ornate bg-white rounded-lg p-6 sm:p-8 paper-texture">
+          <div class="space-y-4">
+            ${phases.map((phase, i) => {
+              let status = 'pending';
+              if (i < currentIndex) status = 'complete';
+              else if (i === currentIndex) status = 'active';
+
+              return `
+                <div class="flex items-center gap-3 progress-step ${status}">
+                  <div class="w-6 h-6 flex items-center justify-center">
+                    ${status === 'active' ? icons.loader :
+                      status === 'complete' ? `<span class="text-green-600">✓</span>` :
+                      `<span class="text-sepiaLight">○</span>`}
+                  </div>
+                  <span class="text-sm sm:text-base">${phase.label}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderContextQuestions() {
+      const triage = state.conversation.sessionState?.triage;
+
+      return `
+        <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
+          <div class="px-4 sm:px-5 py-3 bg-amber-50 border-b border-amber-200">
+            <div class="flex items-center gap-2">
+              <span class="text-amber-600">${icons.question}</span>
+              <span class="font-semibold text-amber-900">Additional Information Needed</span>
+            </div>
+          </div>
+
+          <div class="p-4 sm:p-6">
+            ${triage?.initialAssessment ? `
+              <p class="text-sepia mb-4">${triage.initialAssessment}</p>
+            ` : ''}
+
+            <p class="text-sepiaLight text-sm mb-4">To provide an accurate ruling, I need to understand your specific situation:</p>
+
+            <div class="space-y-4">
+              ${state.conversation.contextQuestions.map((q, i) => `
+                <div class="border border-parchmentDark rounded-lg p-4 bg-parchment">
+                  <label class="block text-sepia font-medium mb-2">${q.question}</label>
+                  ${q.why ? `<p class="text-xs text-sepiaLight mb-2">Why this matters: ${q.why}</p>` : ''}
+                  ${q.options && q.options.length > 0 ? `
+                    <select id="context-answer-${i}" class="w-full px-3 py-2 border border-parchmentDark rounded bg-white text-sepia">
+                      <option value="">Select an option...</option>
+                      ${q.options.map(opt => `<option value="${opt}">${opt}</option>`).join('')}
+                    </select>
+                  ` : `
+                    <input
+                      type="text"
+                      id="context-answer-${i}"
+                      class="w-full px-3 py-2 border border-parchmentDark rounded bg-white text-sepia"
+                      placeholder="Your answer..."
+                    />
+                  `}
+                </div>
+              `).join('')}
+            </div>
+
+            <div class="mt-6 flex gap-3">
+              <button
+                id="contextSubmitBtn"
+                class="px-6 py-3 bg-navy text-white rounded-lg font-medium hover:bg-navyLight flex items-center gap-2"
+              >
+                Continue ${icons.chevronDown}
+              </button>
+              <button
+                onclick="state.conversation.phase = null; render();"
+                class="px-4 py-3 text-sepiaLight hover:text-sepia"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderClarifications() {
+      return `
+        <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
+          <div class="px-4 sm:px-5 py-3 bg-blue-50 border-b border-blue-200">
+            <div class="flex items-center gap-2">
+              <span class="text-blue-600">${icons.question}</span>
+              <span class="font-semibold text-blue-900">Clarification Needed</span>
+            </div>
+          </div>
+
+          <div class="p-4 sm:p-6">
+            <p class="text-sepia mb-4">Your question could be interpreted in different ways:</p>
+
+            <ul class="list-disc list-inside space-y-2 text-sepia mb-6">
+              ${state.conversation.clarifications.map(c => `<li>${c}</li>`).join('')}
+            </ul>
+
+            <p class="text-sepiaLight text-sm mb-4">Please rephrase your question to be more specific:</p>
+
+            <input
+              type="text"
+              id="clarifiedInput"
+              class="w-full px-4 py-3 border-2 border-parchmentDark rounded-lg text-sepia bg-parchment"
+              value="${state.query.replace(/"/g, '&quot;')}"
+            />
+
+            <div class="mt-4">
+              <button
+                onclick="handleClarificationSubmit(document.getElementById('clarifiedInput').value)"
+                class="px-6 py-3 bg-navy text-white rounded-lg font-medium hover:bg-navyLight"
+              >
+                Search Again
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
     }
 
     function renderResult(result) {
-      if (result.canAnswer) {
+      // No sources found
+      if (result.noSourcesFound) {
         return `
           <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
-
-            <!-- Domain tag + confidence -->
-            <div class="px-4 sm:px-5 py-3 bg-parchment border-b border-parchmentDark flex flex-wrap items-center justify-between gap-2">
+            <div class="px-4 sm:px-5 py-3 bg-orange-50 border-b border-orange-200">
               <div class="flex items-center gap-2">
-                ${result.domain ? `
-                  <span class="text-xs px-3 py-1 bg-navy text-white rounded-full font-medium">
-                    ${result.domain.name}
-                  </span>
-                  <span class="text-xs text-sepiaLight hidden sm:inline">${result.domain.translation}</span>
-                ` : ''}
-              </div>
-              <div class="flex items-center gap-1 text-xs text-sepiaLight">
-                <span class="w-2 h-2 rounded-full ${result.confidence >= 90 ? 'bg-green-600' : result.confidence >= 70 ? 'bg-gold' : 'bg-orange-500'}"></span>
-                ${result.confidence}%
+                <span class="text-orange-600">${icons.book}</span>
+                <span class="font-semibold text-orange-900">No Sources Found</span>
               </div>
             </div>
-
-            <!-- Answer -->
-            <div class="p-4 sm:p-6 border-b border-parchmentDark">
-              <div class="flex gap-3 sm:gap-4">
-                <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-green-100 flex items-center justify-center text-green-700 flex-shrink-0 mt-0.5">
-                  ${icons.check}
+            <div class="p-4 sm:p-6">
+              <p class="text-sepia">${result.answer}</p>
+              ${result.sourcesSearched ? `
+                <div class="mt-4 pt-4 border-t border-parchmentDark">
+                  <p class="text-xs text-sepiaLight">Searched for: ${[
+                    ...(result.sourcesSearched.hebrewTermsUsed || []),
+                    ...(result.sourcesSearched.englishTermsUsed || [])
+                  ].join(', ') || 'N/A'}</p>
                 </div>
-                <div class="min-w-0">
-                  <p class="text-sepia text-base sm:text-lg leading-relaxed">${result.answer}</p>
-                </div>
-              </div>
+              ` : ''}
             </div>
+          </div>
+        `;
+      }
 
-            <!-- Chabad Note if present -->
-            ${result.chabadNote ? `
-              <div class="px-4 sm:px-6 py-3 sm:py-4 bg-blue-50 border-b border-blue-100">
-                <p class="text-sm text-navy"><strong>Chabad Practice:</strong> ${result.chabadNote}</p>
-              </div>
+      // Must defer to rabbi
+      if (result.mustDeferToRabbi || !result.canAnswer) {
+        return renderDeferResult(result);
+      }
+
+      // Full answer
+      return renderFullAnswer(result);
+    }
+
+    function renderDeferResult(result) {
+      return `
+        <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
+          <div class="px-4 sm:px-5 py-3 sm:py-4 bg-amber-50 border-b border-amber-200 flex flex-wrap items-center gap-2 sm:gap-3">
+            <span class="text-amber-600 text-lg sm:text-xl">👤</span>
+            <span class="font-semibold text-amber-900 text-sm sm:text-base">Consult a Rabbi</span>
+            ${result.domain ? `
+              <span class="ml-auto text-xs px-3 py-1 bg-amber-100 text-amber-800 rounded-full font-medium">
+                ${result.domain.name}
+              </span>
             ` : ''}
+          </div>
 
-            <!-- Reasoning chain -->
+          <div class="p-4 sm:p-6">
+            <p class="text-sepia text-base sm:text-lg leading-relaxed mb-6">${result.answer}</p>
+
             ${result.reasoning && result.reasoning.length > 0 ? `
-              <div class="p-4 sm:p-6 border-b border-parchmentDark">
+              <div class="pt-4 sm:pt-6 border-t border-parchmentDark">
                 <h3 class="text-xs font-semibold text-sepiaLight uppercase tracking-widest mb-4 flex items-center gap-2">
-                  <span class="text-gold">—</span> Reasoning <span class="text-gold">—</span>
+                  <span class="text-gold">—</span> Relevant Background <span class="text-gold">—</span>
                 </h3>
-
-                <div class="space-y-3 sm:space-y-4">
-                  ${result.reasoning.map((step, i) => `
+                <div class="space-y-3">
+                  ${result.reasoning.map(step => `
                     <div class="source-card rounded p-3 sm:p-4">
                       <div class="text-xs font-semibold text-gold uppercase tracking-wide mb-2">${step.level}</div>
-                      <p class="text-sepia leading-relaxed text-sm sm:text-base">${step.text}</p>
-
+                      <p class="text-sepia leading-relaxed text-sm">${step.text || step.analysis}</p>
                       ${step.source ? `
-                        <button
-                          onclick="toggleSource('${step.source.replace(/'/g, "\\'")}')"
-                          class="mt-3 text-xs text-navy hover:text-navyLight active:text-navyLight flex items-center gap-1 font-medium py-1"
-                        >
-                          📜 <span class="break-all">${step.source}</span>
-                          ${state.expandedSources[step.source] ? icons.chevronUp : icons.chevronDown}
-                        </button>
-
-                        ${state.expandedSources[step.source] && result.sourceTexts && result.sourceTexts[step.source] ? `
-                          <div class="mt-3 p-3 sm:p-4 bg-parchment rounded border border-parchmentDark">
-                            ${result.sourceTexts[step.source].english ? `
-                              <div class="mb-4">
-                                <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">English Translation</div>
-                                <div class="text-sepia leading-relaxed text-sm sm:text-base">${result.sourceTexts[step.source].english}</div>
-                              </div>
-                            ` : ''}
-                            ${result.sourceTexts[step.source].hebrew ? `
-                              <div class="mb-4">
-                                <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">Hebrew Original</div>
-                                <div class="text-sepia leading-relaxed text-right hebrew-text text-base sm:text-lg" dir="rtl">${result.sourceTexts[step.source].hebrew}</div>
-                              </div>
-                            ` : ''}
-                            ${!result.sourceTexts[step.source].found ? `
-                              <div class="text-sepiaLight italic text-sm">Source text not found in Sefaria</div>
-                            ` : ''}
-                            <a
-                              href="https://www.sefaria.org/${step.source.replace(/ /g, '_')}"
-                              target="_blank"
-                              class="text-navy hover:text-navyLight active:text-navyLight flex items-center gap-1 text-sm font-medium py-1"
-                            >
-                              View on Sefaria ${icons.external}
-                            </a>
-                          </div>
-                        ` : ''}
+                        <a href="https://www.sefaria.org/${step.source.replace(/ /g, '_')}" target="_blank"
+                           class="mt-2 text-sm text-navy hover:text-navyLight flex items-center gap-1">
+                          📜 ${step.source} ${icons.external}
+                        </a>
                       ` : ''}
                     </div>
                   `).join('')}
                 </div>
               </div>
             ` : ''}
-
-            <!-- Jargon glossary -->
-            ${result.jargon && result.jargon.length > 0 ? `
-              <div class="px-4 sm:px-6 py-3 sm:py-4 bg-parchment">
-                <div class="text-xs sm:text-sm text-sepia">
-                  <span class="font-semibold text-sepiaLight block sm:inline mb-1 sm:mb-0">Terms:</span>
-                  <span class="block sm:inline">
-                    ${result.jargon.map(j => `
-                      <span class="inline-block mr-2 sm:ml-2 sm:mr-0" title="${j.explanation || ''}"><em class="text-navy">${j.term}</em> = ${j.translation}</span>
-                    `).join('<span class="hidden sm:inline"> · </span>')}
-                  </span>
-                </div>
-              </div>
-            ` : ''}
           </div>
-        `;
-      } else {
-        // Cannot answer - needs rabbi
-        return `
-          <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
+        </div>
+      `;
+    }
 
-            <!-- Header -->
-            <div class="px-4 sm:px-5 py-3 sm:py-4 bg-amber-50 border-b border-amber-200 flex flex-wrap items-center gap-2 sm:gap-3">
-              <span class="text-amber-600 text-lg sm:text-xl">👤</span>
-              <span class="font-semibold text-amber-900 text-sm sm:text-base">Consult a Rabbi</span>
+    function renderFullAnswer(result) {
+      return `
+        <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
+
+          <!-- Header with domain and confidence -->
+          <div class="px-4 sm:px-5 py-3 bg-parchment border-b border-parchmentDark flex flex-wrap items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
               ${result.domain ? `
-                <span class="ml-auto text-xs px-3 py-1 bg-amber-100 text-amber-800 rounded-full font-medium">
+                <span class="text-xs px-3 py-1 bg-navy text-white rounded-full font-medium">
                   ${result.domain.name}
+                </span>
+                <span class="text-xs text-sepiaLight hidden sm:inline">${result.domain.translation || ''}</span>
+              ` : ''}
+              ${result.ruling?.level ? `
+                <span class="text-xs px-2 py-0.5 bg-gold/20 text-sepia rounded">
+                  ${result.ruling.level === 'd_oraita' ? 'Biblical' :
+                    result.ruling.level === 'd_rabbanan' ? 'Rabbinic' : 'Custom'}
                 </span>
               ` : ''}
             </div>
+            <div class="flex items-center gap-2 text-xs text-sepiaLight">
+              <span class="w-2 h-2 rounded-full ${result.confidence >= 90 ? 'bg-green-600' : result.confidence >= 70 ? 'bg-gold' : 'bg-orange-500'}"></span>
+              ${result.confidence}% confidence
+              ${result.sourcesFound ? `· ${result.sourcesFound} sources` : ''}
+            </div>
+          </div>
 
-            <!-- Explanation -->
-            <div class="p-4 sm:p-6">
-              <p class="text-sepia text-base sm:text-lg leading-relaxed mb-6">${result.answer}</p>
+          <!-- Main Answer -->
+          <div class="p-4 sm:p-6 border-b border-parchmentDark">
+            <div class="flex gap-3 sm:gap-4">
+              <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-green-100 flex items-center justify-center text-green-700 flex-shrink-0 mt-0.5">
+                ${icons.check}
+              </div>
+              <div class="min-w-0">
+                <p class="text-sepia text-base sm:text-lg leading-relaxed">${result.answer}</p>
+                ${result.ruling?.summary ? `
+                  <p class="mt-3 text-sm text-navy font-medium">Summary: ${result.ruling.summary}</p>
+                ` : ''}
+              </div>
+            </div>
+          </div>
 
-              ${result.reasoning && result.reasoning.length > 0 ? `
-                <div class="pt-4 sm:pt-6 border-t border-parchmentDark">
-                  <h3 class="text-xs font-semibold text-sepiaLight uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <span class="text-gold">—</span> Relevant Background <span class="text-gold">—</span>
-                  </h3>
-                  <div class="space-y-3 sm:space-y-4">
-                    ${result.reasoning.map(step => `
-                      <div class="source-card rounded p-3 sm:p-4">
-                        <div class="text-xs font-semibold text-gold uppercase tracking-wide mb-2">${step.level}</div>
-                        <p class="text-sepia leading-relaxed text-sm sm:text-base">${step.text}</p>
-                        ${step.source ? `
+          <!-- Chabad Note -->
+          ${result.chabadNote ? `
+            <div class="px-4 sm:px-6 py-3 sm:py-4 bg-blue-50 border-b border-blue-100">
+              <p class="text-sm text-navy"><strong>Chabad Practice:</strong> ${result.chabadNote}</p>
+            </div>
+          ` : ''}
+
+          <!-- Disputes Section -->
+          ${result.disputes && result.disputes.length > 0 ? `
+            <div class="p-4 sm:p-6 border-b border-parchmentDark bg-amber-50/50">
+              <h3 class="text-xs font-semibold text-amber-800 uppercase tracking-widest mb-3 flex items-center gap-2">
+                ${icons.scale} Halachic Disputes
+              </h3>
+              <div class="space-y-3">
+                ${result.disputes.map(d => `
+                  <div class="text-sm">
+                    <p class="font-medium text-sepia">${d.issue}</p>
+                    <p class="text-sepiaLight">Opinions: ${d.opinions.join(' vs. ')}</p>
+                    <p class="text-navy">Resolution: ${d.resolution}</p>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- Reasoning Chain -->
+          ${result.reasoning && result.reasoning.length > 0 ? `
+            <div class="p-4 sm:p-6 border-b border-parchmentDark">
+              <h3 class="text-xs font-semibold text-sepiaLight uppercase tracking-widest mb-4 flex items-center gap-2">
+                <span class="text-gold">—</span> Source-Based Reasoning <span class="text-gold">—</span>
+              </h3>
+
+              <div class="space-y-3 sm:space-y-4">
+                ${result.reasoning.map((step, i) => `
+                  <div class="source-card rounded p-3 sm:p-4">
+                    <div class="text-xs font-semibold text-gold uppercase tracking-wide mb-2">${step.level}</div>
+                    ${step.text ? `<p class="text-sepia leading-relaxed text-sm mb-2 italic">"${step.text}"</p>` : ''}
+                    ${step.analysis ? `<p class="text-sepia leading-relaxed text-sm">${step.analysis}</p>` : ''}
+
+                    ${step.source ? `
+                      <button
+                        onclick="toggleSource('${step.source.replace(/'/g, "\\'")}')"
+                        class="mt-3 text-xs text-navy hover:text-navyLight flex items-center gap-1 font-medium py-1"
+                      >
+                        📜 <span class="break-all">${step.source}</span>
+                        ${state.expandedSources[step.source] ? icons.chevronUp : icons.chevronDown}
+                      </button>
+
+                      ${state.expandedSources[step.source] && result.sourceTexts && result.sourceTexts[step.source] ? `
+                        <div class="mt-3 p-3 sm:p-4 bg-parchment rounded border border-parchmentDark">
+                          ${result.sourceTexts[step.source].english ? `
+                            <div class="mb-4">
+                              <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">English Translation</div>
+                              <div class="text-sepia leading-relaxed text-sm">${result.sourceTexts[step.source].english}</div>
+                            </div>
+                          ` : ''}
+                          ${result.sourceTexts[step.source].hebrew ? `
+                            <div class="mb-4">
+                              <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">Hebrew Original</div>
+                              <div class="text-sepia leading-relaxed text-right hebrew-text text-base" dir="rtl">${result.sourceTexts[step.source].hebrew}</div>
+                            </div>
+                          ` : ''}
                           <a
                             href="https://www.sefaria.org/${step.source.replace(/ /g, '_')}"
                             target="_blank"
-                            class="mt-2 text-sm text-navy hover:text-navyLight active:text-navyLight flex items-center gap-1 font-medium py-1"
+                            class="text-navy hover:text-navyLight flex items-center gap-1 text-sm font-medium py-1"
                           >
-                            📜 <span class="break-all">${step.source}</span> ${icons.external}
+                            View on Sefaria ${icons.external}
                           </a>
-                        ` : ''}
-                      </div>
-                    `).join('')}
+                        </div>
+                      ` : ''}
+                    ` : ''}
                   </div>
-                </div>
-              ` : ''}
+                `).join('')}
+              </div>
+            </div>
+          ` : ''}
 
-              ${result.jargon && result.jargon.length > 0 ? `
-                <div class="mt-4 sm:mt-6 pt-4 border-t border-parchmentDark text-xs sm:text-sm text-sepia">
-                  <span class="font-semibold text-sepiaLight block sm:inline mb-1 sm:mb-0">Terms:</span>
-                  <span class="block sm:inline">
-                    ${result.jargon.map(j => `
-                      <span class="inline-block mr-2 sm:ml-2 sm:mr-0"><em class="text-navy">${j.term}</em> = ${j.translation}</span>
-                    `).join('<span class="hidden sm:inline"> · </span>')}
-                  </span>
-                </div>
+          <!-- Limitations / Consult Rabbi -->
+          ${result.limitations || result.consultRabbi ? `
+            <div class="px-4 sm:px-6 py-3 sm:py-4 bg-amber-50/50 border-b border-parchmentDark">
+              ${result.limitations ? `
+                <p class="text-sm text-amber-800 mb-2"><strong>Note:</strong> ${result.limitations}</p>
+              ` : ''}
+              ${result.consultRabbi ? `
+                <p class="text-sm text-amber-800"><strong>Consult a rabbi if:</strong> ${result.consultRabbi}</p>
               ` : ''}
             </div>
-          </div>
-        `;
-      }
+          ` : ''}
+
+          <!-- Jargon Glossary -->
+          ${result.jargon && result.jargon.length > 0 ? `
+            <div class="px-4 sm:px-6 py-3 sm:py-4 bg-parchment">
+              <div class="text-xs sm:text-sm text-sepia">
+                <span class="font-semibold text-sepiaLight block sm:inline mb-1 sm:mb-0">Terms:</span>
+                <span class="block sm:inline">
+                  ${result.jargon.map(j => `
+                    <span class="inline-block mr-2 sm:ml-2 sm:mr-0" title="${j.explanation || ''}">
+                      <em class="text-navy">${j.term}</em> = ${j.translation}
+                    </span>
+                  `).join('<span class="hidden sm:inline"> · </span>')}
+                </span>
+              </div>
+            </div>
+          ` : ''}
+        </div>
+      `;
     }
 
     // Initial render

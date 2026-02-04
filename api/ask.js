@@ -1,143 +1,204 @@
+// Orchestrator endpoint - coordinates triage, search, and reasoning
+
+const BASE_URL = process.env.VERCEL_URL
+  ? `https://${process.env.VERCEL_URL}`
+  : 'http://localhost:3000';
+
+async function callTriage(question) {
+  const response = await fetch(`${BASE_URL}/api/triage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question })
+  });
+
+  if (!response.ok) {
+    throw new Error('Triage failed');
+  }
+
+  return response.json();
+}
+
+async function callSearchSources(searchTerms, sefariaRefs) {
+  const response = await fetch(`${BASE_URL}/api/search-sources`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ searchTerms, sefariaRefs })
+  });
+
+  if (!response.ok) {
+    throw new Error('Source search failed');
+  }
+
+  return response.json();
+}
+
+async function callReason(question, context, triage, sources) {
+  const response = await fetch(`${BASE_URL}/api/reason`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, context, triage, sources })
+  });
+
+  if (!response.ok) {
+    throw new Error('Reasoning failed');
+  }
+
+  return response.json();
+}
+
 export default async function handler(req, res) {
-  // Only allow POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { question } = req.body;
+  const { question, context, sessionState } = req.body;
 
   if (!question) {
     return res.status(400).json({ error: 'Question is required' });
   }
 
-  const SYSTEM_PROMPT = `You are "HalachaHelper" - a rabbi's helper tool designed to assist Jews with halachic (Jewish law) questions. You are NOT a rabbi and should never present yourself as one. You are a knowledgeable reference tool.
-
-## Your Core Purpose
-Help users understand Jewish law and practice by:
-1. Answering questions that have clear, factual halachic answers
-2. Explaining the reasoning and sources behind the answers
-3. Deferring to "consult a rabbi" when questions require personal judgment
-
-## When to Answer Directly vs. Defer
-
-ANSWER DIRECTLY when the question:
-- Has a clear, established halachic ruling
-- Is asking about facts, definitions, or standard practice
-- Can be resolved by citing authoritative sources
-- Is about "what does Judaism say about X" in general terms
-
-DEFER TO A RABBI when the question:
-- Involves personal circumstances ("given my situation...")
-- Requires weighing competing values or priorities
-- Involves health, life/death, or medical decisions
-- Requires emotional or empathetic judgment
-- Involves financial hardship exceptions
-- Is about interpersonal conflicts requiring mediation
-- Involves contemporary technology with no clear consensus
-
-## Your Response Style
-
-When you CAN answer:
-- Lead with a clear, direct answer
-- Then explain the reasoning step by step
-- Cite specific sources (use exact references like "Shulchan Arukh, Orach Chaim 426:1")
-- Translate Hebrew/Aramaic terms but also show the original (e.g., "Kiddush Levana (sanctification of the moon)")
-- Note if there are different customs (minhagim) and specify the Chabad practice when relevant
-
-When you CANNOT answer:
-- Explain why this requires personal rabbinic guidance
-- Identify what domain of halacha it falls under
-- Provide relevant sources the person could discuss with their rabbi
-- Be helpful, not dismissive
-
-## Source Hierarchy (for Chabad-oriented responses)
-1. Shulchan Arukh HaRav (Alter Rebbe's code) - when it differs practically
-2. Shulchan Arukh (Mechaber and Rema)
-3. Mishneh Torah (Rambam)
-4. Talmud (Gemara)
-5. Torah (Chumash)
-6. Mishnah Berurah and other Acharonim
-7. Contemporary poskim
-
-Only mention Chabad-specific practice when it meaningfully differs from general Ashkenazi practice.
-
-## Response Format
-
-You MUST respond with valid JSON in this exact structure:
-{
-  "canAnswer": boolean,
-  "answer": "The direct answer if canAnswer is true, or explanation of why rabbi consultation is needed",
-  "reasoning": [
-    {
-      "level": "Torah|Talmud|Rishonim|Shulchan Arukh|Acharonim|Practical",
-      "text": "Explanation at this level of the reasoning chain",
-      "source": "Exact source reference or null"
-    }
-  ],
-  "sources": ["Array of source references to fetch from Sefaria"],
-  "confidence": number between 0-100,
-  "domain": {
-    "name": "The halachic domain (e.g., Shabbat, Kashrut, Brachot)",
-    "translation": "English translation of the domain name"
-  },
-  "jargon": [
-    {
-      "term": "Hebrew/Aramaic term used",
-      "translation": "English meaning",
-      "explanation": "Brief explanation if needed"
-    }
-  ],
-  "chabadNote": "Any Chabad-specific practice or perspective, or null if not relevant"
-}
-
-## Important Guidelines
-- Be substantive. Give real information, not vague generalities.
-- If you're not sure about something, say so - don't make things up.
-- The user is educated but not formally trained in halacha - explain things clearly.
-- Always ground your answers in sources, not just "tradition says..."
-- Your confidence score should reflect how settled the halacha is, not your own certainty.`;
-
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
-        system: SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: question
-          }
-        ]
-      })
+    // If we have a complete session state with triage and context, go straight to search + reason
+    if (sessionState?.triageComplete && sessionState?.contextComplete) {
+      // Phase 2: Search sources
+      const sources = await callSearchSources(
+        sessionState.triage.searchTerms,
+        sessionState.triage.searchTerms?.sefariaRefs || []
+      );
+
+      // Check if we found sources
+      if (!sources.success || sources.totalSources === 0) {
+        return res.status(200).json({
+          phase: 'complete',
+          canAnswer: false,
+          noSourcesFound: true,
+          answer: "I couldn't find relevant halachic sources for this question. This question should be directed to a rabbi who can research the primary sources directly.",
+          triage: sessionState.triage,
+          sourcesSearched: sources.searchInfo
+        });
+      }
+
+      // Phase 3: Reason with sources
+      const result = await callReason(
+        question,
+        context || [],
+        sessionState.triage,
+        sources
+      );
+
+      return res.status(200).json({
+        phase: 'complete',
+        ...result,
+        triage: sessionState.triage,
+        sourcesFound: sources.totalSources
+      });
+    }
+
+    // If we have triage but need to collect context answers
+    if (sessionState?.triageComplete && !sessionState?.contextComplete) {
+      // Context has been provided, now search and reason
+      const sources = await callSearchSources(
+        sessionState.triage.searchTerms,
+        sessionState.triage.searchTerms?.sefariaRefs || []
+      );
+
+      if (!sources.success || sources.totalSources === 0) {
+        return res.status(200).json({
+          phase: 'complete',
+          canAnswer: false,
+          noSourcesFound: true,
+          answer: "I couldn't find relevant halachic sources for this question. This question should be directed to a rabbi who can research the primary sources directly.",
+          triage: sessionState.triage,
+          sourcesSearched: sources.searchInfo
+        });
+      }
+
+      const result = await callReason(
+        question,
+        context || [],
+        sessionState.triage,
+        sources
+      );
+
+      return res.status(200).json({
+        phase: 'complete',
+        ...result,
+        triage: sessionState.triage,
+        sourcesFound: sources.totalSources
+      });
+    }
+
+    // Fresh question - start with triage
+    const triage = await callTriage(question);
+
+    // Check if must defer to rabbi immediately
+    if (triage.mustDeferToRabbi) {
+      return res.status(200).json({
+        phase: 'complete',
+        canAnswer: false,
+        mustDeferToRabbi: true,
+        answer: triage.deferReason || "This question requires personal rabbinic guidance.",
+        triage: triage,
+        domain: triage.domain
+      });
+    }
+
+    // Check if we need context
+    if (triage.needsContext && triage.contextQuestions && triage.contextQuestions.length > 0) {
+      return res.status(200).json({
+        phase: 'needs_context',
+        triage: triage,
+        contextQuestions: triage.contextQuestions,
+        sessionState: {
+          triageComplete: true,
+          contextComplete: false,
+          triage: triage
+        }
+      });
+    }
+
+    // Check for ambiguity
+    if (triage.isAmbiguous && triage.clarifications && triage.clarifications.length > 0) {
+      return res.status(200).json({
+        phase: 'needs_clarification',
+        triage: triage,
+        clarifications: triage.clarifications,
+        sessionState: {
+          triageComplete: true,
+          contextComplete: false,
+          triage: triage
+        }
+      });
+    }
+
+    // No context needed - proceed directly to search and reason
+    const sources = await callSearchSources(
+      triage.searchTerms,
+      triage.searchTerms?.sefariaRefs || []
+    );
+
+    if (!sources.success || sources.totalSources === 0) {
+      return res.status(200).json({
+        phase: 'complete',
+        canAnswer: false,
+        noSourcesFound: true,
+        answer: "I couldn't find relevant halachic sources for this question in my search. This question should be directed to a rabbi who can research the primary sources directly.",
+        triage: triage,
+        sourcesSearched: sources.searchInfo
+      });
+    }
+
+    const result = await callReason(question, [], triage, sources);
+
+    return res.status(200).json({
+      phase: 'complete',
+      ...result,
+      triage: triage,
+      sourcesFound: sources.totalSources
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('Anthropic API error:', error);
-      return res.status(500).json({ error: 'AI service error' });
-    }
-
-    const data = await response.json();
-    const content = data.content[0].text;
-
-    // Parse JSON from response
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return res.status(200).json(parsed);
-    }
-
-    return res.status(500).json({ error: 'Failed to parse AI response' });
-
   } catch (error) {
-    console.error('Error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Orchestration error:', error);
+    return res.status(500).json({ error: 'Failed to process question' });
   }
 }
