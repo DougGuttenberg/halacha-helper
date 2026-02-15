@@ -125,7 +125,15 @@
         contextQuestions: [],
         contextAnswers: [],
         clarifications: []
-      }
+      },
+      // User/Auth state
+      user: JSON.parse(localStorage.getItem('halachaHelper_user') || 'null'),
+      showLoginModal: false,
+      // Feedback state
+      showFeedbackModal: false,
+      feedbackSubmitting: false,
+      feedbackSuccess: false,
+      feedbackError: null
     };
 
     // ===========================================
@@ -274,6 +282,131 @@
       render();
     }
 
+    // Collapsible sections state
+    let expandedSections = {
+      reasoning: false,
+      sources: false
+    };
+
+    function toggleSection(section) {
+      expandedSections[section] = !expandedSections[section];
+      render();
+    }
+
+    // ===========================================
+    // USER/AUTH FUNCTIONS
+    // ===========================================
+    function showLogin() {
+      state.showLoginModal = true;
+      render();
+    }
+
+    function hideLogin() {
+      state.showLoginModal = false;
+      render();
+    }
+
+    function logout() {
+      state.user = null;
+      localStorage.removeItem('halachaHelper_user');
+      render();
+    }
+
+    async function handleLogin(email) {
+      try {
+        const response = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'login', email })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data.error || 'Login failed');
+          return;
+        }
+
+        state.user = data.user;
+        localStorage.setItem('halachaHelper_user', JSON.stringify(data.user));
+        state.showLoginModal = false;
+        render();
+      } catch (e) {
+        console.error('Login error:', e);
+        alert('Login failed. Please try again.');
+      }
+    }
+
+    // ===========================================
+    // FEEDBACK FUNCTIONS
+    // ===========================================
+    function showFeedbackModal() {
+      state.showFeedbackModal = true;
+      state.feedbackSuccess = false;
+      state.feedbackError = null;
+      render();
+    }
+
+    function hideFeedbackModal() {
+      state.showFeedbackModal = false;
+      state.feedbackSuccess = false;
+      state.feedbackError = null;
+      render();
+    }
+
+    async function submitFeedback() {
+      const issueType = document.getElementById('feedback-issue-type')?.value;
+      const correction = document.getElementById('feedback-correction')?.value;
+      const notes = document.getElementById('feedback-notes')?.value;
+
+      if (!issueType) {
+        state.feedbackError = 'Please select an issue type';
+        render();
+        return;
+      }
+
+      state.feedbackSubmitting = true;
+      state.feedbackError = null;
+      render();
+
+      try {
+        const response = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'submit',
+            question: state.query,
+            response: state.result,
+            issueType,
+            correction,
+            notes,
+            userId: state.user?.id,
+            userName: state.user?.name || state.user?.email
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to submit feedback');
+        }
+
+        state.feedbackSubmitting = false;
+        state.feedbackSuccess = true;
+        render();
+
+        // Auto-close after success
+        setTimeout(() => {
+          hideFeedbackModal();
+        }, 2000);
+
+      } catch (e) {
+        state.feedbackSubmitting = false;
+        state.feedbackError = e.message;
+        render();
+      }
+    }
+
     // ===========================================
     // ICONS
     // ===========================================
@@ -286,7 +419,10 @@
       loader: `<svg class="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>`,
       question: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`,
       book: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>`,
-      scale: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"></path></svg>`
+      scale: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"></path></svg>`,
+      flag: `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9"></path></svg>`,
+      user: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>`,
+      close: `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>`
     };
 
     // ===========================================
@@ -299,16 +435,38 @@
         <!-- Header -->
         <header class="header-ornate text-white shadow-lg">
           <div class="max-w-3xl mx-auto px-4 py-4 sm:py-5">
-            <div class="flex items-center justify-center gap-2 sm:gap-3">
-              <span class="text-goldLight text-sm sm:text-base">✡</span>
-              <div class="text-center">
-                <h1 class="text-xl sm:text-2xl font-semibold tracking-wide">HalachaHelper</h1>
-                <p class="text-xs text-blue-200 tracking-widest uppercase">Source-Based Halachic Research</p>
+            <div class="flex items-center justify-between">
+              <div class="w-20"></div>
+              <div class="flex items-center justify-center gap-2 sm:gap-3">
+                <span class="text-goldLight text-sm sm:text-base">✡</span>
+                <div class="text-center">
+                  <h1 class="text-xl sm:text-2xl font-semibold tracking-wide">HalachaHelper</h1>
+                  <p class="text-xs text-blue-200 tracking-widest uppercase">Source-Based Halachic Research</p>
+                </div>
+                <span class="text-goldLight text-sm sm:text-base">✡</span>
               </div>
-              <span class="text-goldLight text-sm sm:text-base">✡</span>
+              <div class="w-20 flex justify-end">
+                ${state.user ? `
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs text-blue-200 hidden sm:inline">${state.user.name || state.user.email}</span>
+                    ${state.user.role === 'rabbi' ? '<span class="text-xs px-1.5 py-0.5 bg-gold/30 text-goldLight rounded">Rabbi</span>' : ''}
+                    <button onclick="logout()" class="text-xs text-blue-200 hover:text-white underline">Logout</button>
+                  </div>
+                ` : `
+                  <button onclick="showLogin()" class="text-blue-200 hover:text-white flex items-center gap-1 text-xs">
+                    ${icons.user} <span class="hidden sm:inline">Login</span>
+                  </button>
+                `}
+              </div>
             </div>
           </div>
         </header>
+
+        <!-- Login Modal -->
+        ${state.showLoginModal ? renderLoginModal() : ''}
+
+        <!-- Feedback Modal -->
+        ${state.showFeedbackModal ? renderFeedbackModal() : ''}
 
         <main class="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-8">
 
@@ -616,6 +774,10 @@
     }
 
     function renderFullAnswer(result) {
+      // Handle both old format (reasoning array) and new format (interpretationChain)
+      const hasNewFormat = result.interpretationChain && result.interpretationChain.length > 0;
+      const hasOldFormat = result.reasoning && result.reasoning.length > 0;
+
       return `
         <div class="card-ornate bg-white rounded-lg overflow-hidden paper-texture">
 
@@ -635,14 +797,27 @@
                 </span>
               ` : ''}
             </div>
-            <div class="flex items-center gap-2 text-xs text-sepiaLight">
-              <span class="w-2 h-2 rounded-full ${result.confidence >= 90 ? 'bg-green-600' : result.confidence >= 70 ? 'bg-gold' : 'bg-orange-500'}"></span>
-              ${result.confidence}% confidence
-              ${result.sourcesFound ? `· ${result.sourcesFound} sources` : ''}
+            <div class="flex items-center gap-3 text-xs text-sepiaLight">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full ${result.confidence >= 90 ? 'bg-green-600' : result.confidence >= 70 ? 'bg-gold' : 'bg-orange-500'}"></span>
+                ${result.confidence}% confidence
+                ${result.sourcesFound ? `· ${result.sourcesFound} sources` : ''}
+              </div>
+              ${state.user?.role === 'rabbi' ? `
+                <button
+                  onclick="showFeedbackModal()"
+                  class="flex items-center gap-1 px-2 py-1 text-amber-700 bg-amber-50 hover:bg-amber-100 rounded border border-amber-200 transition-colors"
+                  title="Flag an issue with this response"
+                >
+                  ${icons.flag} Flag Issue
+                </button>
+              ` : ''}
             </div>
           </div>
 
-          <!-- Main Answer -->
+          <!-- ═══════════════════════════════════════════ -->
+          <!-- SECTION 1: THE RULING (Always Visible) -->
+          <!-- ═══════════════════════════════════════════ -->
           <div class="p-4 sm:p-6 border-b border-parchmentDark">
             <div class="flex gap-3 sm:gap-4">
               <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-green-100 flex items-center justify-center text-green-700 flex-shrink-0 mt-0.5">
@@ -651,98 +826,151 @@
               <div class="min-w-0">
                 <p class="text-sepia text-base sm:text-lg leading-relaxed">${result.answer}</p>
                 ${result.ruling?.summary ? `
-                  <p class="mt-3 text-sm text-navy font-medium">Summary: ${result.ruling.summary}</p>
+                  <p class="mt-3 text-sm text-navy font-medium">${result.ruling.summary}</p>
                 ` : ''}
               </div>
             </div>
+
+            <!-- Chabad Note (inline with ruling) -->
+            ${result.chabadNote ? `
+              <div class="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
+                <p class="text-sm text-navy"><strong>Chabad Practice:</strong> ${result.chabadNote}</p>
+              </div>
+            ` : ''}
+
+            <!-- Consult Rabbi Note -->
+            ${result.consultRabbi ? `
+              <div class="mt-4 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                <p class="text-sm text-amber-800"><strong>Consult a rabbi if:</strong> ${result.consultRabbi}</p>
+              </div>
+            ` : ''}
           </div>
 
-          <!-- Chabad Note -->
-          ${result.chabadNote ? `
-            <div class="px-4 sm:px-6 py-3 sm:py-4 bg-blue-50 border-b border-blue-100">
-              <p class="text-sm text-navy"><strong>Chabad Practice:</strong> ${result.chabadNote}</p>
-            </div>
-          ` : ''}
-
-          <!-- Disputes Section -->
-          ${result.disputes && result.disputes.length > 0 ? `
-            <div class="p-4 sm:p-6 border-b border-parchmentDark bg-amber-50/50">
-              <h3 class="text-xs font-semibold text-amber-800 uppercase tracking-widest mb-3 flex items-center gap-2">
-                ${icons.scale} Halachic Disputes
+          <!-- ═══════════════════════════════════════════ -->
+          <!-- SECTION 2: REASONING PROCESS (Collapsible) -->
+          <!-- ═══════════════════════════════════════════ -->
+          <div class="border-b border-parchmentDark">
+            <button
+              onclick="toggleSection('reasoning')"
+              class="w-full px-4 sm:px-6 py-4 flex items-center justify-between hover:bg-parchment/50 transition-colors"
+            >
+              <h3 class="text-sm font-semibold text-sepia flex items-center gap-2">
+                ${icons.scale}
+                <span>How We Got Here</span>
+                <span class="text-xs font-normal text-sepiaLight">(Reasoning Process)</span>
               </h3>
-              <div class="space-y-3">
-                ${result.disputes.map(d => `
-                  <div class="text-sm">
-                    <p class="font-medium text-sepia">${d.issue}</p>
-                    <p class="text-sepiaLight">Opinions: ${d.opinions.join(' vs. ')}</p>
-                    <p class="text-navy">Resolution: ${d.resolution}</p>
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          ` : ''}
+              <span class="text-sepiaLight">${expandedSections.reasoning ? icons.chevronUp : icons.chevronDown}</span>
+            </button>
 
-          <!-- Reasoning Chain -->
-          ${result.reasoning && result.reasoning.length > 0 ? `
-            <div class="p-4 sm:p-6 border-b border-parchmentDark">
-              <h3 class="text-xs font-semibold text-sepiaLight uppercase tracking-widest mb-4 flex items-center gap-2">
-                <span class="text-gold">—</span> Source-Based Reasoning <span class="text-gold">—</span>
-              </h3>
-
-              <div class="space-y-3 sm:space-y-4">
-                ${result.reasoning.map((step, i) => `
-                  <div class="source-card rounded p-3 sm:p-4">
-                    <div class="text-xs font-semibold text-gold uppercase tracking-wide mb-2">${step.level}</div>
-                    ${step.text ? `<p class="text-sepia leading-relaxed text-sm mb-2 italic">"${step.text}"</p>` : ''}
-                    ${step.analysis ? `<p class="text-sepia leading-relaxed text-sm">${step.analysis}</p>` : ''}
-
-                    ${step.source ? `
-                      <button
-                        onclick="toggleSource('${step.source.replace(/'/g, "\\'")}')"
-                        class="mt-3 text-xs text-navy hover:text-navyLight flex items-center gap-1 font-medium py-1"
-                      >
-                        📜 <span class="break-all">${step.source}</span>
-                        ${state.expandedSources[step.source] ? icons.chevronUp : icons.chevronDown}
-                      </button>
-
-                      ${state.expandedSources[step.source] && result.sourceTexts && result.sourceTexts[step.source] ? `
-                        <div class="mt-3 p-3 sm:p-4 bg-parchment rounded border border-parchmentDark">
-                          ${result.sourceTexts[step.source].english ? `
-                            <div class="mb-4">
-                              <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">English Translation</div>
-                              <div class="text-sepia leading-relaxed text-sm">${result.sourceTexts[step.source].english}</div>
-                            </div>
-                          ` : ''}
-                          ${result.sourceTexts[step.source].hebrew ? `
-                            <div class="mb-4">
-                              <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">Hebrew Original</div>
-                              <div class="text-sepia leading-relaxed text-right hebrew-text text-base" dir="rtl">${result.sourceTexts[step.source].hebrew}</div>
-                            </div>
-                          ` : ''}
-                          <a
-                            href="https://www.sefaria.org/${step.source.replace(/ /g, '_')}"
-                            target="_blank"
-                            class="text-navy hover:text-navyLight flex items-center gap-1 text-sm font-medium py-1"
-                          >
-                            View on Sefaria ${icons.external}
-                          </a>
-                        </div>
-                      ` : ''}
+            ${expandedSections.reasoning ? `
+              <div class="px-4 sm:px-6 pb-6">
+                <!-- Understanding the Question -->
+                ${result.thinkingProcess ? `
+                  <div class="mb-4 p-3 bg-blue-50/50 rounded-lg">
+                    <div class="text-xs font-semibold text-navy uppercase tracking-wide mb-1">Understanding the Question</div>
+                    <p class="text-sm text-sepia">${result.thinkingProcess.understandingTheQuestion || ''}</p>
+                    ${result.thinkingProcess.keyHalachicIssue ? `
+                      <p class="text-sm text-navy mt-2"><strong>Key Issue:</strong> ${result.thinkingProcess.keyHalachicIssue}</p>
                     ` : ''}
                   </div>
-                `).join('')}
-              </div>
-            </div>
-          ` : ''}
+                ` : ''}
 
-          <!-- Limitations / Consult Rabbi -->
-          ${result.limitations || result.consultRabbi ? `
-            <div class="px-4 sm:px-6 py-3 sm:py-4 bg-amber-50/50 border-b border-parchmentDark">
-              ${result.limitations ? `
-                <p class="text-sm text-amber-800 mb-2"><strong>Note:</strong> ${result.limitations}</p>
-              ` : ''}
-              ${result.consultRabbi ? `
-                <p class="text-sm text-amber-800"><strong>Consult a rabbi if:</strong> ${result.consultRabbi}</p>
+                <!-- Interpretation Chain (New Format) -->
+                ${hasNewFormat ? `
+                  <div class="space-y-3">
+                    <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-2">Tracing Through Sources</div>
+                    ${result.interpretationChain.map((step, i) => `
+                      <div class="source-card rounded p-3 sm:p-4 ${step.agreesOrDisagrees === 'disagrees' ? 'border-l-amber-500' : step.agreesOrDisagrees === 'qualifies' || step.agreesOrDisagrees === 'adds_exception' ? 'border-l-blue-500' : ''}">
+                        <div class="flex items-center gap-2 mb-2">
+                          <span class="text-xs font-semibold text-gold uppercase tracking-wide">${step.sourceLevel}</span>
+                          ${step.agreesOrDisagrees === 'disagrees' ? '<span class="text-xs px-2 py-0.5 bg-amber-100 text-amber-700 rounded">Disagrees</span>' :
+                            step.agreesOrDisagrees === 'qualifies' ? '<span class="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded">Qualifies</span>' :
+                            step.agreesOrDisagrees === 'adds_exception' ? '<span class="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded">Exception</span>' : ''}
+                        </div>
+                        ${step.position ? `<p class="text-sepia leading-relaxed text-sm mb-2 italic">"${step.position}"</p>` : ''}
+                        ${step.significance ? `<p class="text-sepia leading-relaxed text-sm">${step.significance}</p>` : ''}
+                        ${step.source ? `
+                          <p class="mt-2 text-xs text-navy">📜 ${step.source}</p>
+                        ` : ''}
+                      </div>
+                    `).join('')}
+                  </div>
+                ` : ''}
+
+                <!-- Old Format Fallback -->
+                ${!hasNewFormat && hasOldFormat ? `
+                  <div class="space-y-3">
+                    ${result.reasoning.map(step => `
+                      <div class="source-card rounded p-3 sm:p-4">
+                        <div class="text-xs font-semibold text-gold uppercase tracking-wide mb-2">${step.level}</div>
+                        ${step.text ? `<p class="text-sepia leading-relaxed text-sm mb-2 italic">"${step.text}"</p>` : ''}
+                        ${step.analysis ? `<p class="text-sepia leading-relaxed text-sm">${step.analysis}</p>` : ''}
+                        ${step.source ? `<p class="mt-2 text-xs text-navy">📜 ${step.source}</p>` : ''}
+                      </div>
+                    `).join('')}
+                  </div>
+                ` : ''}
+
+                <!-- Application -->
+                ${result.application ? `
+                  <div class="mt-4 p-3 bg-green-50/50 rounded-lg border border-green-100">
+                    <div class="text-xs font-semibold text-green-800 uppercase tracking-wide mb-1">Application</div>
+                    <p class="text-sm text-sepia">${result.application.howApplied || ''}</p>
+                    ${result.application.circumstances ? `
+                      <p class="text-sm text-sepiaLight mt-2"><em>This ruling would change if: ${result.application.circumstances}</em></p>
+                    ` : ''}
+                  </div>
+                ` : ''}
+              </div>
+            ` : ''}
+          </div>
+
+          <!-- ═══════════════════════════════════════════ -->
+          <!-- SECTION 3: SOURCES (Collapsible) -->
+          <!-- ═══════════════════════════════════════════ -->
+          ${(result.sourceTexts && Object.keys(result.sourceTexts).length > 0) || (result.sources && result.sources.length > 0) ? `
+            <div class="border-b border-parchmentDark">
+              <button
+                onclick="toggleSection('sources')"
+                class="w-full px-4 sm:px-6 py-4 flex items-center justify-between hover:bg-parchment/50 transition-colors"
+              >
+                <h3 class="text-sm font-semibold text-sepia flex items-center gap-2">
+                  ${icons.book}
+                  <span>View Sources</span>
+                  <span class="text-xs font-normal text-sepiaLight">(${result.sourcesFound || Object.keys(result.sourceTexts || {}).length} texts)</span>
+                </h3>
+                <span class="text-sepiaLight">${expandedSections.sources ? icons.chevronUp : icons.chevronDown}</span>
+              </button>
+
+              ${expandedSections.sources ? `
+                <div class="px-4 sm:px-6 pb-6 space-y-4">
+                  ${Object.entries(result.sourceTexts || {}).map(([ref, source]) => `
+                    <div class="source-card rounded p-4">
+                      <div class="flex items-center justify-between mb-3">
+                        <span class="font-medium text-sepia">${ref}</span>
+                        <a
+                          href="https://www.sefaria.org/${ref.replace(/ /g, '_')}"
+                          target="_blank"
+                          class="text-xs text-navy hover:text-navyLight flex items-center gap-1"
+                        >
+                          Sefaria ${icons.external}
+                        </a>
+                      </div>
+                      ${source.english ? `
+                        <div class="mb-3">
+                          <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-1">English</div>
+                          <div class="text-sepia leading-relaxed text-sm">${source.english.substring(0, 500)}${source.english.length > 500 ? '...' : ''}</div>
+                        </div>
+                      ` : ''}
+                      ${source.hebrew ? `
+                        <div>
+                          <div class="text-xs font-semibold text-sepiaLight uppercase tracking-wide mb-1">Hebrew</div>
+                          <div class="text-sepia leading-relaxed text-right hebrew-text text-sm" dir="rtl">${source.hebrew.substring(0, 500)}${source.hebrew.length > 500 ? '...' : ''}</div>
+                        </div>
+                      ` : ''}
+                    </div>
+                  `).join('')}
+                </div>
               ` : ''}
             </div>
           ` : ''}
@@ -762,6 +990,140 @@
               </div>
             </div>
           ` : ''}
+        </div>
+      `;
+    }
+
+    // ===========================================
+    // MODAL RENDERS
+    // ===========================================
+    function renderLoginModal() {
+      return `
+        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onclick="if(event.target === this) hideLogin()">
+          <div class="bg-white rounded-lg shadow-xl max-w-md w-full paper-texture card-ornate">
+            <div class="px-6 py-4 border-b border-parchmentDark flex items-center justify-between">
+              <h3 class="font-semibold text-sepia">Rabbi Login</h3>
+              <button onclick="hideLogin()" class="text-sepiaLight hover:text-sepia">${icons.close}</button>
+            </div>
+            <div class="p-6">
+              <p class="text-sm text-sepiaLight mb-4">Login to provide feedback on responses. Only authorized rabbis can flag issues.</p>
+              <div class="space-y-4">
+                <div>
+                  <label class="block text-sm font-medium text-sepia mb-1">Email Address</label>
+                  <input
+                    type="email"
+                    id="login-email"
+                    class="w-full px-4 py-2 border border-parchmentDark rounded-lg bg-parchment text-sepia"
+                    placeholder="your@email.com"
+                  />
+                </div>
+                <button
+                  onclick="handleLogin(document.getElementById('login-email').value)"
+                  class="w-full px-4 py-3 bg-navy text-white rounded-lg font-medium hover:bg-navyLight"
+                >
+                  Login
+                </button>
+              </div>
+              <p class="text-xs text-sepiaLight mt-4 text-center">Contact administrator to get access.</p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderFeedbackModal() {
+      if (state.feedbackSuccess) {
+        return `
+          <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div class="bg-white rounded-lg shadow-xl max-w-md w-full paper-texture card-ornate p-8 text-center">
+              <div class="text-green-600 text-4xl mb-4">✓</div>
+              <h3 class="font-semibold text-sepia text-lg mb-2">Feedback Submitted</h3>
+              <p class="text-sepiaLight">Thank you for helping improve HalachaHelper.</p>
+            </div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onclick="if(event.target === this) hideFeedbackModal()">
+          <div class="bg-white rounded-lg shadow-xl max-w-lg w-full paper-texture card-ornate max-h-[90vh] overflow-y-auto">
+            <div class="px-6 py-4 border-b border-parchmentDark flex items-center justify-between sticky top-0 bg-white">
+              <h3 class="font-semibold text-sepia flex items-center gap-2">
+                ${icons.flag} Flag Issue with Response
+              </h3>
+              <button onclick="hideFeedbackModal()" class="text-sepiaLight hover:text-sepia">${icons.close}</button>
+            </div>
+            <div class="p-6">
+              <!-- Original Question Summary -->
+              <div class="mb-4 p-3 bg-parchment rounded-lg">
+                <div class="text-xs font-semibold text-sepiaLight uppercase mb-1">Question</div>
+                <p class="text-sm text-sepia">${state.query}</p>
+              </div>
+
+              ${state.feedbackError ? `
+                <div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                  ${state.feedbackError}
+                </div>
+              ` : ''}
+
+              <div class="space-y-4">
+                <!-- Issue Type -->
+                <div>
+                  <label class="block text-sm font-medium text-sepia mb-1">Issue Type *</label>
+                  <select
+                    id="feedback-issue-type"
+                    class="w-full px-4 py-2 border border-parchmentDark rounded-lg bg-white text-sepia"
+                  >
+                    <option value="">Select issue type...</option>
+                    <option value="incorrect_conclusion">Incorrect Conclusion - The final ruling is wrong</option>
+                    <option value="misapplied_source">Misapplied Source - Source cited but used incorrectly</option>
+                    <option value="missing_source">Missing Source - Key source not referenced</option>
+                    <option value="reasoning_flaw">Reasoning Flaw - Logic or methodology error</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+
+                <!-- Correction -->
+                <div>
+                  <label class="block text-sm font-medium text-sepia mb-1">What should the correct answer be?</label>
+                  <textarea
+                    id="feedback-correction"
+                    rows="3"
+                    class="w-full px-4 py-2 border border-parchmentDark rounded-lg bg-parchment text-sepia"
+                    placeholder="Provide the correct ruling or interpretation..."
+                  ></textarea>
+                </div>
+
+                <!-- Notes -->
+                <div>
+                  <label class="block text-sm font-medium text-sepia mb-1">Additional Notes</label>
+                  <textarea
+                    id="feedback-notes"
+                    rows="2"
+                    class="w-full px-4 py-2 border border-parchmentDark rounded-lg bg-parchment text-sepia"
+                    placeholder="Any other context or sources to consider..."
+                  ></textarea>
+                </div>
+
+                <!-- Submit -->
+                <div class="flex gap-3 pt-2">
+                  <button
+                    onclick="submitFeedback()"
+                    ${state.feedbackSubmitting ? 'disabled' : ''}
+                    class="flex-1 px-4 py-3 bg-navy text-white rounded-lg font-medium hover:bg-navyLight disabled:bg-sepiaLight flex items-center justify-center gap-2"
+                  >
+                    ${state.feedbackSubmitting ? icons.loader + ' Submitting...' : 'Submit Feedback'}
+                  </button>
+                  <button
+                    onclick="hideFeedbackModal()"
+                    class="px-4 py-3 border border-parchmentDark text-sepia rounded-lg hover:bg-parchment"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       `;
     }
