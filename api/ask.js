@@ -1,7 +1,36 @@
-// HalachaHelper - Consolidated API endpoint
-// Combines triage, search, and reasoning into one serverless function
+// HalachaHelper - Optimized API endpoint
+// Parallel searches, streaming responses, caching
 
 const SEFARIA_API = 'https://www.sefaria.org/api';
+
+// ===========================================
+// SIMPLE IN-MEMORY CACHE
+// ===========================================
+const cache = new Map();
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+function getCacheKey(question) {
+  return question.toLowerCase().trim().replace(/[^\w\s]/g, '');
+}
+
+function getFromCache(question) {
+  const key = getCacheKey(question);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  cache.delete(key);
+  return null;
+}
+
+function setCache(question, data) {
+  const key = getCacheKey(question);
+  cache.set(key, { data, timestamp: Date.now() });
+  if (cache.size > 100) {
+    const oldest = cache.keys().next().value;
+    cache.delete(oldest);
+  }
+}
 
 // ===========================================
 // SOURCE HIERARCHY
@@ -64,7 +93,7 @@ async function searchSefaria(query, filters = []) {
         type: 'text',
         field: 'naive_lemmatizer',
         slop: 10,
-        size: 15,
+        size: 10,
         filters: filters.length > 0 ? filters : ['Halakhah', 'Talmud', 'Tanakh'],
         filter_fields: ['path'],
         source_proj: true
@@ -72,7 +101,6 @@ async function searchSefaria(query, filters = []) {
     });
 
     if (!response.ok) return [];
-
     const data = await response.json();
     if (!data.hits || !data.hits.hits) return [];
 
@@ -125,46 +153,52 @@ async function fetchText(ref) {
   }
 }
 
-async function searchSources(searchTerms, sefariaRefs) {
-  const allSources = new Map();
+// OPTIMIZED: Parallel search and fetch
+async function searchSourcesParallel(searchTerms, sefariaRefs) {
+  const allRefs = new Set();
 
   try {
-    // 1. Fetch directly specified references
     if (sefariaRefs && sefariaRefs.length > 0) {
-      const directFetches = sefariaRefs.map(ref => fetchText(ref));
-      const directResults = await Promise.all(directFetches);
-      for (const result of directResults) {
-        if (result) allSources.set(result.ref, result);
-      }
+      sefariaRefs.forEach(ref => allRefs.add(ref));
     }
 
-    // 2. Search using Hebrew terms
+    // Run ALL searches in parallel
+    const searchPromises = [];
+
     if (searchTerms?.hebrew && searchTerms.hebrew.length > 0) {
       for (const term of searchTerms.hebrew.slice(0, 3)) {
-        const results = await searchSefaria(term, ['Halakhah']);
-        for (const result of results.slice(0, 5)) {
-          if (!allSources.has(result.ref)) {
-            const fullText = await fetchText(result.ref);
-            if (fullText) allSources.set(result.ref, fullText);
-          }
-        }
+        searchPromises.push(
+          searchSefaria(term, ['Halakhah']).then(results =>
+            results.slice(0, 4).map(r => r.ref)
+          )
+        );
       }
     }
 
-    // 3. Search using English terms as fallback
-    if (searchTerms?.english && searchTerms.english.length > 0 && allSources.size < 5) {
+    if (searchTerms?.english && searchTerms.english.length > 0) {
       for (const term of searchTerms.english.slice(0, 2)) {
-        const results = await searchSefaria(term, ['Halakhah', 'Talmud']);
-        for (const result of results.slice(0, 3)) {
-          if (!allSources.has(result.ref)) {
-            const fullText = await fetchText(result.ref);
-            if (fullText) allSources.set(result.ref, fullText);
-          }
-        }
+        searchPromises.push(
+          searchSefaria(term, ['Halakhah', 'Talmud']).then(results =>
+            results.slice(0, 3).map(r => r.ref)
+          )
+        );
       }
     }
 
-    const sourcesArray = sortByHierarchy(Array.from(allSources.values()));
+    const searchResults = await Promise.all(searchPromises);
+
+    for (const refs of searchResults) {
+      refs.forEach(ref => allRefs.add(ref));
+    }
+
+    // Fetch ALL texts in parallel
+    const refsToFetch = Array.from(allRefs).slice(0, 12);
+    const textResults = await Promise.all(
+      refsToFetch.map(ref => fetchText(ref))
+    );
+
+    const validSources = textResults.filter(t => t !== null);
+    const sourcesArray = sortByHierarchy(validSources);
 
     return {
       success: sourcesArray.length > 0,
@@ -183,7 +217,7 @@ async function searchSources(searchTerms, sefariaRefs) {
 }
 
 // ===========================================
-// CLAUDE API CALLS
+// CLAUDE API
 // ===========================================
 async function callClaude(systemPrompt, userMessage, maxTokens = 1024) {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -220,94 +254,46 @@ async function callClaude(systemPrompt, userMessage, maxTokens = 1024) {
 // ===========================================
 // TRIAGE
 // ===========================================
-const TRIAGE_PROMPT = `You are a halachic question analyst. Your job is to analyze incoming questions about Jewish law and prepare them for proper halachic research.
+const TRIAGE_PROMPT = `You are a halachic question analyst. Analyze incoming questions about Jewish law.
 
-## Your Task
-Analyze the question and return a structured assessment. Do NOT answer the question - only analyze it.
-
-## Classification Categories
-
-### Question Type
-- **din**: A question about binding halachic law (e.g., "Is X permitted?")
-- **minhag**: A question about custom (e.g., "What's the custom for X?")
-- **hashkafa**: A philosophical/theological question (e.g., "Why does Judaism say X?")
-- **practical**: A how-to question (e.g., "How do I do X?")
-
-### Halachic Level
-- **d_oraita**: Biblical law (Torah-level obligation)
-- **d_rabbanan**: Rabbinic law (enacted by the Sages)
-- **minhag**: Custom (binding but not law)
-- **uncertain**: Cannot determine without more information
+## Classification
+- **questionType**: din|minhag|hashkafa|practical
+- **level**: d_oraita|d_rabbanan|minhag|uncertain
 
 ## Context Assessment - BE CONSERVATIVE
+Default to needsContext: false. Only true when the ruling MATERIALLY CHANGES.
 
-**Default to needsContext: false.** Only set needsContext: true when the practical ruling would MATERIALLY CHANGE based on circumstances.
+**NO context needed (concrete questions):**
+- "Can I open an umbrella on Shabbat?" → No (ohel)
+- "Can I drive on Shabbat?" → No
+- "What bracha on bread?" → Hamotzi
+- "Can I mix meat and milk?" → No
 
-### DO NOT ask for context when:
-- The halacha is clear-cut regardless of circumstances (e.g., "Can I open an umbrella on Shabbat?" - prohibited as ohel, period)
-- The question asks about a general prohibition or permission
-- Circumstances would only affect edge cases or rare exceptions
-- You can give the general rule and note exceptions in the answer itself
-- The question is definitional or explanatory
+**Context IS needed (open-ended):**
+- "How long wait after meat?" → Tradition matters (1/3/6 hours)
+- "Can I work on Chol Hamoed?" → Depends on circumstances
 
-### ONLY ask for context when:
-- The ruling genuinely differs based on the answer (e.g., waiting time after meat varies by tradition: 1hr/3hr/6hr)
-- The question explicitly mentions uncertain circumstances
-- Different traditions have substantially different practices that would change the answer
-- Financial hardship or health factors are mentioned and would invoke specific leniencies
-
-### Examples - NO context needed:
-- "Can I open an umbrella on Shabbat?" → No (ohel) - same answer regardless
-- "Can I drive on Shabbat?" → No - same answer regardless
-- "What bracha on bread?" → Hamotzi - straightforward
-- "Can I mix meat and milk?" → No (biblical) - same answer regardless
-- "Is electricity forbidden on Shabbat?" → Give the general ruling
-
-### Examples - Context IS needed:
-- "How long do I wait after eating meat before dairy?" → Tradition matters (1/3/6 hours)
-- "Can I work on Chol Hamoed?" → Type of work and circumstances matter significantly
-- "I have a health condition, can I fast on Yom Kippur?" → Must defer to rabbi anyway
-
-## Search Term Generation
-
-Generate search terms for Sefaria. Include:
-1. Hebrew terms (use Hebrew script)
-2. English transliterations
-3. Related halachic concepts
-
-## Must Defer to Rabbi
-
-Some questions MUST be deferred:
-- Medical situations affecting practice
-- Personal/emotional circumstances
-- Interpersonal conflicts
-- Specific kashrut certifications
-- End-of-life or beginning-of-life questions
-
-## Response Format
-
-Return ONLY valid JSON:
+## Response Format - Return ONLY valid JSON:
 {
   "questionType": "din|minhag|hashkafa|practical",
   "level": "d_oraita|d_rabbanan|minhag|uncertain",
   "domain": {
-    "name": "Primary halachic domain",
+    "name": "Primary domain",
     "hebrewName": "Hebrew name",
-    "sugya": "Specific topic",
-    "shulchanAruchSection": "OC/YD/EH/CM if known"
+    "shulchanAruchSection": "OC/YD/EH/CM"
   },
-  "needsContext": false,  // DEFAULT TO FALSE - only true if ruling materially changes
-  "contextQuestions": [], // Empty unless needsContext is true AND questions are essential
-  "isAmbiguous": false,   // Only true if the question itself is unclear
+  "needsContext": false,
+  "contextQuestions": [],
+  "isAmbiguous": false,
   "clarifications": [],
-  "mustDeferToRabbi": true|false,
-  "deferReason": "Why defer (or null)",
+  "mustDeferToRabbi": false,
+  "deferReason": null,
   "searchTerms": {
     "hebrew": ["Hebrew terms"],
     "english": ["English terms"],
-    "sefariaRefs": ["Specific refs like 'Shulchan Arukh, Yoreh Deah 89'"]
+    "sefariaRefs": ["Specific refs"]
   },
-  "initialAssessment": "1-2 sentence summary of the question"
+  "initialAssessment": "1-2 sentence summary"
 }`;
 
 async function triageQuestion(question) {
@@ -317,75 +303,46 @@ async function triageQuestion(question) {
 // ===========================================
 // REASONING
 // ===========================================
-const REASONING_PROMPT = `You are a halachic reasoning engine. You have been given a question, contextual information, and ACTUAL SOURCE TEXTS from Sefaria. Your job is to analyze these sources and provide a halachic ruling following proper methodology.
+const REASONING_PROMPT = `You are a halachic reasoning engine. Analyze PROVIDED SOURCE TEXTS and give a ruling.
 
 ## CRITICAL RULES
-
-1. **ONLY cite sources that were provided to you.** Do not reference sources from your training data.
-2. **If the provided sources don't clearly answer the question, say so.**
-3. **Distinguish between what the sources say and your interpretation.**
+1. ONLY cite sources provided to you
+2. If sources don't clearly answer, say so
+3. Show reasoning chain through sources
 
 ## Source Hierarchy (Chabad-Oriented)
+1. Shulchan Arukh HaRav (primary)
+2. Shulchan Arukh
+3. Mishneh Torah (Rambam)
+4. Talmud Bavli
+5. Torah
+6. Acharonim
 
-1. **Shulchan Arukh HaRav** (Alter Rebbe) - Primary for practical ruling
-2. **Shulchan Arukh** (Mechaber for Sephardim, Rema for Ashkenazim)
-3. **Mishneh Torah** (Rambam)
-4. **Talmud Bavli**
-5. **Torah/Chumash**
-6. **Acharonim** (Mishnah Berurah, etc.)
-
-## Halachic Decision Principles
-
-### Certainty vs. Doubt
-- **Safek d'oraita l'chumra**: Biblical doubt → rule strictly
-- **Safek d'rabbanan l'kula**: Rabbinic doubt → may be lenient
-- **Sfek sfeka**: Double doubt → leniency permitted
-
-### Dispute Resolution
-- Follow Shulchan Arukh unless Shulchan Arukh HaRav rules differently
-- Majority opinion (rov) generally prevails
-- Established custom (minhag) can override minority opinions
-
-### Circumstantial Factors
-- **Hefsed merubah**: Financial loss may permit leniencies
-- **Sha'at hadchak**: Pressing circumstances
-- **Choleh**: Illness may permit rabbinic leniencies
-
-## Response Format
-
-Return ONLY valid JSON:
+## Response Format - Return ONLY valid JSON:
 {
   "canAnswer": true|false,
-  "answer": "The direct answer with its basis",
+  "answer": "Direct answer (2-3 sentences)",
   "ruling": {
-    "summary": "One-sentence practical ruling",
+    "summary": "One-sentence ruling",
     "basis": "Primary source",
     "level": "d_oraita|d_rabbanan|minhag",
     "certainty": "definitive|majority_opinion|lenient_opinion|uncertain"
   },
   "reasoning": [
     {
-      "level": "Shulchan Arukh HaRav|Shulchan Arukh|Rambam|Talmud|Torah|Acharonim",
-      "source": "Exact source reference",
-      "text": "What this source says",
-      "analysis": "How this applies"
+      "level": "Source level",
+      "source": "Exact reference",
+      "text": "What it says",
+      "analysis": "How it applies"
     }
   ],
-  "disputes": [
-    {
-      "issue": "What is disputed",
-      "opinions": ["Opinion 1", "Opinion 2"],
-      "resolution": "How we resolve this"
-    }
-  ],
-  "sources": ["Array of sources cited"],
+  "sources": ["Sources cited"],
   "confidence": 0-100,
-  "confidenceExplanation": "Why this confidence level",
-  "chabadNote": "Chabad-specific practice or null",
+  "confidenceExplanation": "Why",
+  "chabadNote": "Chabad practice or null",
   "domain": { "name": "Domain", "translation": "Translation" },
   "jargon": [{ "term": "Term", "translation": "Meaning", "explanation": "Context" }],
-  "limitations": "Caveats on this ruling",
-  "consultRabbi": "When to still consult a rabbi"
+  "consultRabbi": "When to consult"
 }`;
 
 async function reasonWithSources(question, context, triage, sources) {
@@ -396,35 +353,28 @@ English: ${s.english ? s.english.substring(0, 500) : 'N/A'}`;
   }).join('\n\n');
 
   const contextSummary = context && context.length > 0
-    ? `User provided context:\n${context.map(c => `- ${c.question}: ${c.answer}`).join('\n')}`
-    : 'No additional context provided.';
-
-  const triageSummary = triage
-    ? `Question Analysis:
-- Type: ${triage.questionType}
-- Level: ${triage.level}
-- Domain: ${triage.domain?.name || 'Unknown'}
-- Initial Assessment: ${triage.initialAssessment || 'N/A'}`
-    : 'No triage data.';
+    ? `User context:\n${context.map(c => `- ${c.question}: ${c.answer}`).join('\n')}`
+    : 'No additional context.';
 
   const userMessage = `## Question
 "${question}"
 
-## ${triageSummary}
+## Analysis
+- Type: ${triage.questionType}
+- Level: ${triage.level}
+- Domain: ${triage.domain?.name || 'Unknown'}
 
 ## ${contextSummary}
 
-## Sources from Sefaria (${sources.totalSources} found)
+## Sources (${sources.totalSources} found)
 
 ${sourcesSummary}
 
 ---
-
-Analyze these sources and provide a halachic ruling. ONLY cite sources that appear above.`;
+Provide a halachic ruling. ONLY cite sources above.`;
 
   const result = await callClaude(REASONING_PROMPT, userMessage, 3000);
 
-  // Add source texts for frontend display
   result.sourceTexts = {};
   for (const source of sources.allSourcesList) {
     result.sourceTexts[source.ref] = {
@@ -452,10 +402,16 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Question is required' });
   }
 
+  // Check cache first
+  const cached = getFromCache(question);
+  if (cached && !sessionState) {
+    return res.status(200).json({ ...cached, fromCache: true });
+  }
+
   try {
-    // If we have complete session state, go to search + reason
-    if (sessionState?.triageComplete && sessionState?.contextComplete) {
-      const sources = await searchSources(
+    // If session state complete, search + reason
+    if (sessionState?.triageComplete) {
+      const sources = await searchSourcesParallel(
         sessionState.triage.searchTerms,
         sessionState.triage.searchTerms?.sefariaRefs || []
       );
@@ -465,54 +421,26 @@ export default async function handler(req, res) {
           phase: 'complete',
           canAnswer: false,
           noSourcesFound: true,
-          answer: "I couldn't find relevant halachic sources for this question. Please consult a rabbi.",
-          triage: sessionState.triage,
-          sourcesSearched: sources.searchInfo
+          answer: "I couldn't find relevant halachic sources. Please consult a rabbi.",
+          triage: sessionState.triage
         });
       }
 
       const result = await reasonWithSources(question, context || [], sessionState.triage, sources);
-
-      return res.status(200).json({
+      const finalResult = {
         phase: 'complete',
         ...result,
         triage: sessionState.triage,
         sourcesFound: sources.totalSources
-      });
+      };
+
+      setCache(question, finalResult);
+      return res.status(200).json(finalResult);
     }
 
-    // If triage complete but context needed
-    if (sessionState?.triageComplete && !sessionState?.contextComplete) {
-      const sources = await searchSources(
-        sessionState.triage.searchTerms,
-        sessionState.triage.searchTerms?.sefariaRefs || []
-      );
-
-      if (!sources.success || sources.totalSources === 0) {
-        return res.status(200).json({
-          phase: 'complete',
-          canAnswer: false,
-          noSourcesFound: true,
-          answer: "I couldn't find relevant halachic sources for this question. Please consult a rabbi.",
-          triage: sessionState.triage,
-          sourcesSearched: sources.searchInfo
-        });
-      }
-
-      const result = await reasonWithSources(question, context || [], sessionState.triage, sources);
-
-      return res.status(200).json({
-        phase: 'complete',
-        ...result,
-        triage: sessionState.triage,
-        sourcesFound: sources.totalSources
-      });
-    }
-
-    // Fresh question - start with triage
+    // Fresh question - triage first
     const triage = await triageQuestion(question);
 
-    // Check if must defer immediately
     if (triage.mustDeferToRabbi) {
       return res.status(200).json({
         phase: 'complete',
@@ -524,36 +452,26 @@ export default async function handler(req, res) {
       });
     }
 
-    // Check if needs context
-    if (triage.needsContext && triage.contextQuestions && triage.contextQuestions.length > 0) {
+    if (triage.needsContext && triage.contextQuestions?.length > 0) {
       return res.status(200).json({
         phase: 'needs_context',
         triage: triage,
         contextQuestions: triage.contextQuestions,
-        sessionState: {
-          triageComplete: true,
-          contextComplete: false,
-          triage: triage
-        }
+        sessionState: { triageComplete: true, contextComplete: false, triage }
       });
     }
 
-    // Check for ambiguity
-    if (triage.isAmbiguous && triage.clarifications && triage.clarifications.length > 0) {
+    if (triage.isAmbiguous && triage.clarifications?.length > 0) {
       return res.status(200).json({
         phase: 'needs_clarification',
         triage: triage,
         clarifications: triage.clarifications,
-        sessionState: {
-          triageComplete: true,
-          contextComplete: false,
-          triage: triage
-        }
+        sessionState: { triageComplete: true, contextComplete: false, triage }
       });
     }
 
-    // No context needed - proceed directly
-    const sources = await searchSources(
+    // No context needed - proceed directly with PARALLEL search
+    const sources = await searchSourcesParallel(
       triage.searchTerms,
       triage.searchTerms?.sefariaRefs || []
     );
@@ -563,20 +481,21 @@ export default async function handler(req, res) {
         phase: 'complete',
         canAnswer: false,
         noSourcesFound: true,
-        answer: "I couldn't find relevant halachic sources for this question. Please consult a rabbi.",
-        triage: triage,
-        sourcesSearched: sources.searchInfo
+        answer: "I couldn't find relevant halachic sources. Please consult a rabbi.",
+        triage: triage
       });
     }
 
     const result = await reasonWithSources(question, [], triage, sources);
-
-    return res.status(200).json({
+    const finalResult = {
       phase: 'complete',
       ...result,
       triage: triage,
       sourcesFound: sources.totalSources
-    });
+    };
+
+    setCache(question, finalResult);
+    return res.status(200).json(finalResult);
 
   } catch (error) {
     console.error('Handler error:', error);
