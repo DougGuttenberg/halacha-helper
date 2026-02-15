@@ -308,12 +308,12 @@ async function triageQuestion(question) {
 // ===========================================
 // REASONING
 // ===========================================
-const REASONING_PROMPT = `You are a halachic reasoning engine. Analyze PROVIDED SOURCE TEXTS and give a ruling.
+const REASONING_PROMPT = `You are a halachic reasoning engine. Analyze PROVIDED SOURCE TEXTS and provide halachic analysis.
 
 ## CRITICAL RULES
 1. ONLY cite sources provided to you
 2. If sources don't clearly answer, say so
-3. Show reasoning chain through sources
+3. ALWAYS show your reasoning chain through sources - even if the final ruling requires a rabbi
 
 ## Source Hierarchy (Chabad-Oriented)
 1. Shulchan Arukh HaRav (primary)
@@ -323,15 +323,31 @@ const REASONING_PROMPT = `You are a halachic reasoning engine. Analyze PROVIDED 
 5. Torah
 6. Acharonim
 
+## When to set mustDeferToRabbi: true
+Set this when the question involves:
+- Personal medical situations affecting practice
+- Specific interpersonal disputes
+- Questions about kashrut certification
+- End-of-life or beginning-of-life decisions
+- Financial disputes requiring din Torah
+
+EVEN when mustDeferToRabbi is true, you MUST still:
+- Show all relevant sources you found
+- Explain the general halachic principles involved
+- Walk through the reasoning chain
+- Just don't give a definitive personal ruling
+
 ## Response Format - Return ONLY valid JSON:
 {
   "canAnswer": true|false,
-  "answer": "Direct answer (2-3 sentences)",
+  "mustDeferToRabbi": true|false,
+  "deferReason": "Why this needs a rabbi (or null)",
+  "answer": "Direct answer OR 'This requires personal rabbinic guidance because...' with summary of the issues",
   "ruling": {
-    "summary": "One-sentence ruling",
+    "summary": "One-sentence ruling (or 'Consult your rabbi' if deferring)",
     "basis": "Primary source",
     "level": "d_oraita|d_rabbanan|minhag",
-    "certainty": "definitive|majority_opinion|lenient_opinion|uncertain"
+    "certainty": "definitive|majority_opinion|lenient_opinion|uncertain|requires_rabbi"
   },
   "reasoning": [
     {
@@ -347,7 +363,7 @@ const REASONING_PROMPT = `You are a halachic reasoning engine. Analyze PROVIDED 
   "chabadNote": "Chabad practice or null",
   "domain": { "name": "Domain", "translation": "Translation" },
   "jargon": [{ "term": "Term", "translation": "Meaning", "explanation": "Context" }],
-  "consultRabbi": "When to consult"
+  "consultRabbi": "Specific aspects to discuss with rabbi"
 }`;
 
 async function reasonWithSources(question, context, triage, sources) {
@@ -368,6 +384,7 @@ English: ${s.english ? s.english.substring(0, 500) : 'N/A'}`;
 - Type: ${triage.questionType}
 - Level: ${triage.level}
 - Domain: ${triage.domain?.name || 'Unknown'}
+${triage.mustDeferToRabbi ? `- NOTE: This was flagged as requiring rabbinic consultation because: ${triage.deferReason || 'personal circumstances involved'}` : ''}
 
 ## ${contextSummary}
 
@@ -376,7 +393,9 @@ English: ${s.english ? s.english.substring(0, 500) : 'N/A'}`;
 ${sourcesSummary}
 
 ---
-Provide a halachic ruling. ONLY cite sources above.`;
+${triage.mustDeferToRabbi
+  ? 'Analyze these sources and explain the relevant halachic principles, but DO NOT give a personal ruling. Show your reasoning chain, then explain why this specific case requires a rabbi.'
+  : 'Provide a halachic ruling. ONLY cite sources above.'}`;
 
   const result = await callClaude(REASONING_PROMPT, userMessage, 3000);
 
@@ -446,16 +465,8 @@ export default async function handler(req, res) {
     // Fresh question - triage first
     const triage = await triageQuestion(question);
 
-    if (triage.mustDeferToRabbi) {
-      return res.status(200).json({
-        phase: 'complete',
-        canAnswer: false,
-        mustDeferToRabbi: true,
-        answer: triage.deferReason || "This question requires personal rabbinic guidance.",
-        triage: triage,
-        domain: triage.domain
-      });
-    }
+    // Don't bail out early for mustDeferToRabbi - still gather sources and show reasoning
+    // The reasoning step will handle showing thought process without a final ruling
 
     if (triage.needsContext && triage.contextQuestions?.length > 0) {
       return res.status(200).json({
